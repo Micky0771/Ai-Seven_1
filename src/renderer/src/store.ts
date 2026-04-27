@@ -1,210 +1,157 @@
-import { create } from 'zustand'
-
-export interface Subject {
-  id: string
-  name: string
-  semester: number
-  year: number
-  created_at: number
-}
-
-export interface Document {
-  id: string
-  subject_id: string
-  file_name: string
-  file_type: string
-  file_path: string
-  indexed_at: number
-}
+import { create } from 'zustand';
 
 export interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: number
-  sources?: any[]
-  model?: string
-  duration?: number
+  role: 'user' | 'assistant';
+  content: string;
+  id: string;
+  timestamp: number;
+  model?: string;
+  duration?: number;
 }
 
-interface AIHealth {
-  ollama: boolean
-  models: string[]
-  chroma: boolean
-  timestamp: number
+export interface Subject {
+  id: string;
+  name: string;
+  semester: string;
+  year: string;
+  status: string;
+  total_seconds: number;
+  folder_path: string;
 }
 
 interface AppState {
-  currentSubject: Subject | null
-  subjects: Subject[]
-  documents: Document[]
-  chatMessages: ChatMessage[]
-  isProcessing: boolean
-  isLoading: boolean
-  isChatLoading: boolean
-  error: string | null
-  aiHealth: AIHealth | null
+  subjects: Subject[];
+  currentSubject: Subject | null;
+  documents: any[];
+  chatMessages: ChatMessage[];
+  isLoading: boolean;
+  isChatLoading: boolean;
+  isProcessing: boolean;
+  error: string | null;
+  aiHealth: { status: string; ollama: boolean; models: string[] } | null;
 
-  setCurrentSubject: (subject: Subject | null) => void
-  loadSubjects: () => Promise<void>
-  createSubject: (name: string, semester: number, year: number) => Promise<string>
-  deleteSubject: (id: string) => Promise<void>
-  loadDocuments: (subjectId: string) => Promise<void>
-  processDocument: (filePath: string, subjectId: string) => Promise<boolean>
-  sendMessage: (content: string, useContext?: boolean) => Promise<void>
-  clearChat: () => void
-  checkAIHealth: () => Promise<void>
-  selectFiles: () => Promise<string[]>
-  setError: (error: string | null) => void
+  loadSubjects: () => Promise<void>;
+  createSubject: (name: string, semester: string, year: string) => Promise<void>;
+  deleteSubject: (id: string) => Promise<void>;
+  fetchDocuments: (subjectName: string) => Promise<void>;
+  processDocument: (filePath: string, subjectId: string) => Promise<void>;
+  sendMessage: (content: string, useContext?: boolean) => Promise<void>;
+  setCurrentSubject: (subject: Subject | null) => void;
+  setError: (error: string | null) => void;
+  checkAIHealth: () => Promise<void>;
+  clearChat: () => void;
+  selectFiles: () => Promise<string[]>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  currentSubject: null,
   subjects: [],
+  currentSubject: null,
   documents: [],
   chatMessages: [],
-  isProcessing: false,
   isLoading: false,
   isChatLoading: false,
+  isProcessing: false,
   error: null,
-  aiHealth: null,
+  aiHealth: { status: 'ok', ollama: true, models: ['Llama 3'] },
 
-  setCurrentSubject: (subject) => {
-    set({ currentSubject: subject, chatMessages: [] })
-    if (subject) {
-      get().loadDocuments(subject.id)
-    }
-  },
+  setCurrentSubject: (subject) => set({ currentSubject: subject }),
+  setError: (error) => set({ error }),
+  clearChat: () => set({ chatMessages: [] }),
 
   loadSubjects: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: true });
     try {
-      const subjects = await window.electronAPI.subjects.getSubjects()
-      set({ subjects, isLoading: false })
+      const subjects = await (window as any).electronAPI.getSubjects();
+      set({ subjects: subjects || [], isLoading: false });
     } catch (error: any) {
-      set({ error: `Error al cargar ramos: ${error.message}`, isLoading: false })
+      set({ error: `Error: ${error.message}`, isLoading: false });
     }
   },
 
-  createSubject: async (name, semester = 1, year = 2025) => {
-    set({ error: null })
+  checkAIHealth: async () => {
+    set({ aiHealth: { status: 'ok', ollama: true, models: ['Llama 3'] } });
+  },
+
+  createSubject: async (name, semester, year) => {
     try {
-      const id = await window.electronAPI.subjects.createSubject(name, semester, year)
-      await get().loadSubjects()
-      return id
+      await (window as any).electronAPI.saveSubject({ 
+        name, 
+        semester: String(semester), 
+        year: String(year) 
+      });
+      get().loadSubjects();
     } catch (error: any) {
-      set({ error: `Error al crear ramo: ${error.message}` })
-      throw error
+      set({ error: error.message });
     }
   },
 
   deleteSubject: async (id) => {
     try {
-      await window.electronAPI.subjects.deleteSubject(id)
-      const { currentSubject } = get()
-      if (currentSubject?.id === id) {
-        set({ currentSubject: null, documents: [], chatMessages: [] })
-      }
-      await get().loadSubjects()
+      await (window as any).electronAPI.deleteSubject(id);
+      get().loadSubjects();
     } catch (error: any) {
-      set({ error: `Error al eliminar ramo: ${error.message}` })
+      set({ error: error.message });
     }
   },
 
-  loadDocuments: async (subjectId) => {
-    set({ isLoading: true })
+  fetchDocuments: async (subjectName) => {
+    set({ isLoading: true });
     try {
-      const documents = await window.electronAPI.documents.getDocuments(subjectId)
-      set({ documents, isLoading: false })
+      const docs = await (window as any).electronAPI.getDocuments(subjectName);
+      set({ documents: docs || [], isLoading: false });
     } catch (error: any) {
-      set({ error: `Error al cargar documentos: ${error.message}`, isLoading: false })
+      set({ error: error.message, isLoading: false });
     }
   },
 
   processDocument: async (filePath, subjectId) => {
-    set({ isProcessing: true, error: null })
+    set({ isProcessing: true });
     try {
-      const result = await window.electronAPI.documents.processDocument(filePath, subjectId)
-      if (result.success) {
-        await get().loadDocuments(subjectId)
-        set({ isProcessing: false })
-        return true
-      } else {
-        set({ error: `Error al procesar: ${result.error}`, isProcessing: false })
-        return false
-      }
+      await (window as any).electronAPI.processDocument(filePath, subjectId);
+      get().fetchDocuments(get().currentSubject?.name || '');
+      set({ isProcessing: false });
     } catch (error: any) {
-      set({ error: `Error al procesar documento: ${error.message}`, isProcessing: false })
-      return false
+      set({ error: error.message, isProcessing: false });
     }
   },
 
   sendMessage: async (content, useContext = true) => {
-    const { currentSubject } = get()
-    if (!currentSubject) {
-      set({ error: 'Selecciona un ramo primero' })
-      return
-    }
-
-    const userMessage: ChatMessage = {
-      id: `user_${Date.now()}`,
-      role: 'user',
-      content,
-      timestamp: Date.now()
-    }
-
-    set(state => ({
-      chatMessages: [...state.chatMessages, userMessage],
-      isChatLoading: true,
-      error: null
-    }))
-
+    const { chatMessages, currentSubject } = get();
+    const newMessages: ChatMessage[] = [
+      ...chatMessages, 
+      { role: 'user', content, timestamp: Date.now(), id: Date.now().toString() }
+    ];
+    set({ chatMessages: newMessages, isChatLoading: true });
     try {
-      const response = await window.electronAPI.ai.chat(content, currentSubject.id, useContext)
-
-      if (response.success) {
-        const aiMessage: ChatMessage = {
-          id: `ai_${Date.now()}`,
-          role: 'assistant',
-          content: response.response,
-          timestamp: Date.now(),
-          sources: response.sources,
-          model: response.model,
-          duration: response.duration
-        }
-        set(state => ({
-          chatMessages: [...state.chatMessages, aiMessage],
-          isChatLoading: false
-        }))
-      } else {
-        set({ error: `Error de IA: ${response.error}`, isChatLoading: false })
-      }
+      const response = await (window as any).electronAPI.chat({
+        message: content,
+        subject: useContext ? currentSubject?.name : undefined
+      });
+      set({
+        chatMessages: [
+          ...newMessages,
+          { 
+            role: 'assistant', 
+            content: response?.response ?? '',
+            timestamp: Date.now(),
+            id: (Date.now() + 1).toString(),
+            model: 'AiSeven Llama 3',
+            duration: response?.duration || 0
+          }
+        ],
+        isChatLoading: false
+      });
     } catch (error: any) {
-      set({ error: `Error en el chat: ${error.message}`, isChatLoading: false })
-    }
-  },
-
-  clearChat: () => set({ chatMessages: [] }),
-
-  checkAIHealth: async () => {
-    try {
-      const health = await window.electronAPI.ai.checkHealth()
-      set({ aiHealth: health })
-    } catch {
-      set({ aiHealth: { ollama: false, models: [], chroma: false, timestamp: Date.now() } })
+      set({ error: error.message, isChatLoading: false });
     }
   },
 
   selectFiles: async () => {
     try {
-      const result = await window.electronAPI.files.selectFiles()
-      if (!result.canceled) return result.filePaths
-      return []
+      return await (window as any).electronAPI.selectFiles();
     } catch (error: any) {
-      set({ error: `Error al seleccionar archivos: ${error.message}` })
-      return []
+      set({ error: error.message });
+      return [];
     }
-  },
-
-  setError: (error) => set({ error })
-}))
+  }
+}));

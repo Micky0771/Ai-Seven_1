@@ -1,191 +1,248 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from "electron";
-import path from "path";
-import DatabaseManager from "./database/DatabaseManager";
-import OllamaManager from "./ai/OllamaManager";
-import ChromaManager from "./ai/ChromaManager";
-import DocumentProcessor from "./ai/DocumentProcessor";
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import * as path from 'path'
+import * as fs from 'fs'
+import fetch from 'node-fetch'
+import { v4 as uuidv4 } from 'uuid'
 
-let mainWindow: BrowserWindow | null = null;
+const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+const OLLAMA_BASE_URL = 'http://localhost:11434'
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2:3b'
 
-const createWindow = () => {
-  mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 800,
-    minHeight: 600,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-    show: false,
-    autoHideMenuBar: true,
-  });
+// ─── Base de Datos con sql.js ──────────────────────────────────────────────────
+let db: any = null
+const dbPath = path.join(app.getPath('userData'), 'aiseven.db')
 
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+async function initDatabase() {
+  const initSqlJs = require('sql.js')
+  const SQL = await initSqlJs()
+
+  if (fs.existsSync(dbPath)) {
+    db = new SQL.Database(fs.readFileSync(dbPath))
   } else {
-    mainWindow.loadFile(
-      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
+    db = new SQL.Database()
+  }
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS subjects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      semester INTEGER DEFAULT 1,
+      year INTEGER DEFAULT 2025,
+      created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
     );
-  }
+    CREATE TABLE IF NOT EXISTS documents (
+      id TEXT PRIMARY KEY,
+      subject_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_type TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      content TEXT,
+      indexed_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
+    );
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      subject_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      model TEXT,
+      duration INTEGER,
+      created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
+    );
+  `)
+  saveDb()
+  console.log('[DB] Lista en:', dbPath)
+}
 
-  mainWindow.once("ready-to-show", () => {
-    if (mainWindow) {
-      mainWindow.show();
-      setTimeout(() => {
-        checkAIServices();
-      }, 2000);
-    }
-  });
+function saveDb() {
+  if (!db) return
+  fs.writeFileSync(dbPath, Buffer.from(db.export()))
+}
 
-  if (process.env.NODE_ENV === "development") {
-    mainWindow.webContents.openDevTools();
-  }
-};
-
-ipcMain.handle("subjects:get", async () => {
-  return DatabaseManager.getSubjects();
-});
-
-ipcMain.handle(
-  "subjects:create",
-  async (_, name: string, semester: number, year: number) => {
-    return DatabaseManager.addSubject(name, semester, year);
-  },
-);
-
-ipcMain.handle(
-  "documents:process",
-  async (_, filePath: string, subjectId: string) => {
-    return DocumentProcessor.processDocument(filePath, subjectId);
-  },
-);
-
-ipcMain.handle("documents:getBySubject", async (_, subjectId: string) => {
-  return DatabaseManager.getDocumentsBySubject(subjectId);
-});
-
-ipcMain.handle(
-  "ai:chat",
-  async (_, { prompt, subjectId, useContext = true }) => {
-    try {
-      let context: string[] = [];
-
-      if (useContext && subjectId) {
-        const searchResults = await ChromaManager.search(prompt, { subjectId });
-        context = searchResults.map((result) => result.content);
-      }
-
-      const response = await OllamaManager.generateResponse(prompt, context);
-
-      if (subjectId) {
-        DatabaseManager.addChatMessage(subjectId, "user", prompt);
-
-        const sources =
-          context.length > 0
-            ? Array.from(new Set(context.map((c) => c.substring(0, 100))))
-            : undefined;
-
-        DatabaseManager.addChatMessage(
-          subjectId,
-          "assistant",
-          response.content,
-          sources,
-        );
-      }
-
-      return {
-        success: true,
-        response: response.content,
-        model: response.model,
-        duration: response.totalDuration,
-        sources:
-          context.length > 0
-            ? context.map((c, i) => ({
-                id: i,
-                preview: c.substring(0, 200) + "...",
-              }))
-            : [],
-      };
-    } catch (error) {
-      console.error("Chat error:", error);
-      return {
-        success: false,
-        error: error.message,
-        response: "Error al procesar tu pregunta.",
-      };
-    }
-  },
-);
-
-ipcMain.handle("ai:check-health", async () => {
-  const [ollamaAvailable, chromaAvailable] = await Promise.all([
-    OllamaManager.checkAvailability(),
-    ChromaManager.checkConnection(),
-  ]);
-
-  return {
-    ollama: ollamaAvailable,
-    chroma: chromaAvailable,
-    timestamp: Date.now(),
-  };
-});
-
-ipcMain.handle("files:select", async () => {
-  if (!mainWindow) return { canceled: true };
-
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openFile", "multiSelections"],
-    filters: [
-      { name: "Documentos", extensions: ["pdf", "txt", "md", "docx", "doc"] },
-      { name: "Todos los archivos", extensions: ["*"] },
-    ],
-  });
-
-  return {
-    canceled: result.canceled,
-    filePaths: result.filePaths,
-  };
-});
-
-async function checkAIServices() {
-  if (!mainWindow) return;
-
+function dbAll(sql: string, params: any[] = []): any[] {
   try {
-    const health = await OllamaManager.checkAvailability(true);
-
-    mainWindow.webContents.send("ai-health-update", {
-      ollama: health,
-      timestamp: Date.now(),
-    });
-
-    if (!health) {
-      console.warn(
-        "Ollama no disponible. Asegúrate de que esté corriendo en http://localhost:11434",
-      );
-    }
-  } catch (error) {
-    console.error("Verificación de salud falló:", error);
+    const stmt = db.prepare(sql)
+    const rows: any[] = []
+    stmt.bind(params)
+    while (stmt.step()) rows.push(stmt.getAsObject())
+    stmt.free()
+    return rows
+  } catch (e) {
+    console.error('[DB]', e)
+    return []
   }
 }
 
-app.on("ready", () => {
-  createWindow();
+function dbRun(sql: string, params: any[] = []) {
+  db.run(sql, params)
+  saveDb()
+}
 
-  setTimeout(() => {
-    ChromaManager.checkConnection().catch(console.error);
-  }, 1000);
-});
+// ─── Ventana ───────────────────────────────────────────────────────────────────
+let mainWindow: BrowserWindow | null = null
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#0f172a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  })
+
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173')
+    //mainWindow.webContents.openDevTools({ mode: 'detach' })
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../../dist/renderer/index.html'))
   }
-});
 
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('closed', () => { mainWindow = null })
+}
+
+// ─── IPC Handlers ──────────────────────────────────────────────────────────────
+ipcMain.handle('subjects:get', () =>
+  dbAll('SELECT * FROM subjects ORDER BY year DESC, semester DESC, name ASC')
+)
+
+ipcMain.handle('subjects:create', (_e, name: string, semester: number, year: number) => {
+  const id = uuidv4()
+  dbRun('INSERT INTO subjects (id,name,semester,year) VALUES (?,?,?,?)', [id, name, semester, year])
+  return id
+})
+
+ipcMain.handle('subjects:delete', (_e, id: string) => {
+  dbRun('DELETE FROM documents WHERE subject_id=?', [id])
+  dbRun('DELETE FROM chat_messages WHERE subject_id=?', [id])
+  dbRun('DELETE FROM subjects WHERE id=?', [id])
+  return true
+})
+
+ipcMain.handle('documents:get', (_e, subjectId: string) =>
+  dbAll('SELECT * FROM documents WHERE subject_id=? ORDER BY indexed_at DESC', [subjectId])
+)
+
+ipcMain.handle('documents:process', async (_e, filePath: string, subjectId: string) => {
+  try {
+    if (!fs.existsSync(filePath)) return { success: false, error: 'Archivo no encontrado' }
+    const fileName = path.basename(filePath)
+    const ext = path.extname(filePath).toLowerCase()
+    if (!['.txt', '.md', '.pdf', '.docx'].includes(ext))
+      return { success: false, error: `Tipo no soportado: ${ext}` }
+
+    let content = ''
+    if (ext === '.txt' || ext === '.md') {
+      content = fs.readFileSync(filePath, 'utf-8')
+    } else {
+      content = `[${fileName}] — Pendiente extracción de texto (${ext})`
+    }
+
+    const id = uuidv4()
+    dbRun(
+      'INSERT INTO documents (id,subject_id,file_name,file_type,file_path,content,indexed_at) VALUES (?,?,?,?,?,?,?)',
+      [id, subjectId, fileName, ext, filePath, content, Date.now()]
+    )
+    return { success: true, id }
+  } catch (e: any) {
+    return { success: false, error: e.message }
   }
-});
+})
+
+ipcMain.handle('documents:delete', (_e, id: string) => {
+  dbRun('DELETE FROM documents WHERE id=?', [id])
+  return true
+})
+
+ipcMain.handle('ai:health', async () => {
+  try {
+    const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
+    const data: any = await res.json()
+    return { ollama: true, models: data.models?.map((m: any) => m.name) ?? [], timestamp: Date.now() }
+  } catch {
+    return { ollama: false, models: [], timestamp: Date.now() }
+  }
+})
+
+ipcMain.handle('ai:models', async () => {
+  try {
+    const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/tags`)
+    const data: any = await res.json()
+    return data.models?.map((m: any) => m.name) ?? []
+  } catch { return [] }
+})
+
+ipcMain.handle('ai:chat', async (_e, message: string, subjectId: string, useContext: boolean) => {
+  const start = Date.now()
+  try {
+    let contextText = ''
+    if (useContext) {
+      const docs = dbAll('SELECT file_name, content FROM documents WHERE subject_id=?', [subjectId])
+      if (docs.length > 0) {
+        contextText = docs.map((d: any) =>
+          `--- ${d.file_name} ---\n${String(d.content ?? '').substring(0, 2000)}`
+        ).join('\n\n')
+      }
+    }
+
+    const systemPrompt = contextText
+      ? `Eres AiSeven, asistente académico. Responde SOLO con este material:\n\n${contextText}\n\nSi no está en el material, indícalo.`
+      : `Eres AiSeven, asistente académico. Ayuda al estudiante de forma clara y educativa.`
+
+    dbRun('INSERT INTO chat_messages (id,subject_id,role,content,created_at) VALUES (?,?,?,?,?)',
+      [uuidv4(), subjectId, 'user', message, Date.now()])
+
+    const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: message }
+        ],
+        stream: false
+      }),
+      signal: AbortSignal.timeout(60000)
+    })
+
+    if (!res.ok) throw new Error(`Ollama error ${res.status}`)
+    const data: any = await res.json()
+    const response = data.message?.content ?? 'Sin respuesta'
+    const duration = Date.now() - start
+
+    dbRun('INSERT INTO chat_messages (id,subject_id,role,content,model,duration,created_at) VALUES (?,?,?,?,?,?,?)',
+      [uuidv4(), subjectId, 'assistant', response, OLLAMA_MODEL, duration, Date.now()])
+
+    return { success: true, response, model: OLLAMA_MODEL, duration, sources: [] }
+  } catch (e: any) {
+    return { success: false, error: e.message }
+  }
+})
+
+ipcMain.handle('files:select', async () =>
+  dialog.showOpenDialog(mainWindow!, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Documentos', extensions: ['txt', 'md', 'pdf', 'docx'] }]
+  })
+)
+
+ipcMain.handle('app:version', () => app.getVersion())
+
+// ─── Lifecycle ─────────────────────────────────────────────────────────────────
+app.whenReady().then(async () => {
+  await initDatabase()
+  createWindow()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') { saveDb(); app.quit() }
+})

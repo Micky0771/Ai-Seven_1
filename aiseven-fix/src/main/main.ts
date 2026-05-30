@@ -6,8 +6,9 @@ import { v4 as uuidv4 } from 'uuid'
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 const OLLAMA_BASE_URL = 'http://localhost:11434'
-const OLLAMA_MODEL = 'llama3'
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3'
 
+// ─── Base de Datos con sql.js ──────────────────────────────────────────────────
 let db: any = null
 const dbPath = path.join(app.getPath('userData'), 'aiseven.db')
 
@@ -16,8 +17,7 @@ async function initDatabase() {
   const SQL = await initSqlJs()
 
   if (fs.existsSync(dbPath)) {
-    const fileBuffer = fs.readFileSync(dbPath)
-    db = new SQL.Database(fileBuffer)
+    db = new SQL.Database(fs.readFileSync(dbPath))
   } else {
     db = new SQL.Database()
   }
@@ -28,7 +28,7 @@ async function initDatabase() {
       name TEXT NOT NULL,
       semester INTEGER DEFAULT 1,
       year INTEGER DEFAULT 2025,
-      created_at INTEGER DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+      created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
     );
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
@@ -37,7 +37,7 @@ async function initDatabase() {
       file_type TEXT NOT NULL,
       file_path TEXT NOT NULL,
       content TEXT,
-      indexed_at INTEGER DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+      indexed_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
     );
     CREATE TABLE IF NOT EXISTS chat_messages (
       id TEXT PRIMARY KEY,
@@ -46,18 +46,16 @@ async function initDatabase() {
       content TEXT NOT NULL,
       model TEXT,
       duration INTEGER,
-      created_at INTEGER DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+      created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000)
     );
   `)
-
   saveDb()
-  console.log('[DB] Inicializada en:', dbPath)
+  console.log('[DB] Lista en:', dbPath)
 }
 
 function saveDb() {
   if (!db) return
-  const data = db.export()
-  fs.writeFileSync(dbPath, Buffer.from(data))
+  fs.writeFileSync(dbPath, Buffer.from(db.export()))
 }
 
 function dbAll(sql: string, params: any[] = []): any[] {
@@ -69,7 +67,7 @@ function dbAll(sql: string, params: any[] = []): any[] {
     stmt.free()
     return rows
   } catch (e) {
-    console.error('[DB] Error:', e)
+    console.error('[DB]', e)
     return []
   }
 }
@@ -79,6 +77,7 @@ function dbRun(sql: string, params: any[] = []) {
   saveDb()
 }
 
+// ─── Ventana ───────────────────────────────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null
 
 function createWindow() {
@@ -100,32 +99,33 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173')
     mainWindow.webContents.openDevTools({ mode: 'detach' })
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/renderer/index.html'))
+    mainWindow.loadFile(path.join(__dirname, '../../dist/renderer/index.html'))
   }
 
   mainWindow.once('ready-to-show', () => mainWindow?.show())
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
+// ─── IPC Handlers ──────────────────────────────────────────────────────────────
 ipcMain.handle('subjects:get', () =>
   dbAll('SELECT * FROM subjects ORDER BY year DESC, semester DESC, name ASC')
 )
 
 ipcMain.handle('subjects:create', (_e, name: string, semester: number, year: number) => {
   const id = uuidv4()
-  dbRun('INSERT INTO subjects (id, name, semester, year) VALUES (?, ?, ?, ?)', [id, name, semester, year])
+  dbRun('INSERT INTO subjects (id,name,semester,year) VALUES (?,?,?,?)', [id, name, semester, year])
   return id
 })
 
 ipcMain.handle('subjects:delete', (_e, id: string) => {
-  dbRun('DELETE FROM documents WHERE subject_id = ?', [id])
-  dbRun('DELETE FROM chat_messages WHERE subject_id = ?', [id])
-  dbRun('DELETE FROM subjects WHERE id = ?', [id])
+  dbRun('DELETE FROM documents WHERE subject_id=?', [id])
+  dbRun('DELETE FROM chat_messages WHERE subject_id=?', [id])
+  dbRun('DELETE FROM subjects WHERE id=?', [id])
   return true
 })
 
 ipcMain.handle('documents:get', (_e, subjectId: string) =>
-  dbAll('SELECT * FROM documents WHERE subject_id = ? ORDER BY indexed_at DESC', [subjectId])
+  dbAll('SELECT * FROM documents WHERE subject_id=? ORDER BY indexed_at DESC', [subjectId])
 )
 
 ipcMain.handle('documents:process', async (_e, filePath: string, subjectId: string) => {
@@ -140,39 +140,39 @@ ipcMain.handle('documents:process', async (_e, filePath: string, subjectId: stri
     if (ext === '.txt' || ext === '.md') {
       content = fs.readFileSync(filePath, 'utf-8')
     } else {
-      content = `[${fileName}] — Extracción de contenido pendiente (${ext})`
+      content = `[${fileName}] — Pendiente extracción de texto (${ext})`
     }
 
     const id = uuidv4()
     dbRun(
-      'INSERT INTO documents (id, subject_id, file_name, file_type, file_path, content, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO documents (id,subject_id,file_name,file_type,file_path,content,indexed_at) VALUES (?,?,?,?,?,?,?)',
       [id, subjectId, fileName, ext, filePath, content, Date.now()]
     )
     return { success: true, id }
-  } catch (error: any) {
-    return { success: false, error: error.message }
+  } catch (e: any) {
+    return { success: false, error: e.message }
   }
 })
 
 ipcMain.handle('documents:delete', (_e, id: string) => {
-  dbRun('DELETE FROM documents WHERE id = ?', [id])
+  dbRun('DELETE FROM documents WHERE id=?', [id])
   return true
 })
 
 ipcMain.handle('ai:health', async () => {
   try {
     const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
-    const data = await res.json() as any
-    return { ollama: true, models: data.models?.map((m: any) => m.name) ?? [], chroma: false, timestamp: Date.now() }
+    const data: any = await res.json()
+    return { ollama: true, models: data.models?.map((m: any) => m.name) ?? [], timestamp: Date.now() }
   } catch {
-    return { ollama: false, models: [], chroma: false, timestamp: Date.now() }
+    return { ollama: false, models: [], timestamp: Date.now() }
   }
 })
 
 ipcMain.handle('ai:models', async () => {
   try {
     const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/tags`)
-    const data = await res.json() as any
+    const data: any = await res.json()
     return data.models?.map((m: any) => m.name) ?? []
   } catch { return [] }
 })
@@ -182,7 +182,7 @@ ipcMain.handle('ai:chat', async (_e, message: string, subjectId: string, useCont
   try {
     let contextText = ''
     if (useContext) {
-      const docs = dbAll('SELECT file_name, content FROM documents WHERE subject_id = ?', [subjectId])
+      const docs = dbAll('SELECT file_name, content FROM documents WHERE subject_id=?', [subjectId])
       if (docs.length > 0) {
         contextText = docs.map((d: any) =>
           `--- ${d.file_name} ---\n${String(d.content ?? '').substring(0, 2000)}`
@@ -191,10 +191,10 @@ ipcMain.handle('ai:chat', async (_e, message: string, subjectId: string, useCont
     }
 
     const systemPrompt = contextText
-      ? `Eres AiSeven, un asistente académico. Responde SOLO con este material:\n\n${contextText}\n\nSi la respuesta no está en el material, indícalo.`
-      : `Eres AiSeven, un asistente académico. Ayuda al estudiante de forma clara y educativa.`
+      ? `Eres AiSeven, asistente académico. Responde SOLO con este material:\n\n${contextText}\n\nSi no está en el material, indícalo.`
+      : `Eres AiSeven, asistente académico. Ayuda al estudiante de forma clara y educativa.`
 
-    dbRun('INSERT INTO chat_messages (id, subject_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)',
+    dbRun('INSERT INTO chat_messages (id,subject_id,role,content,created_at) VALUES (?,?,?,?,?)',
       [uuidv4(), subjectId, 'user', message, Date.now()])
 
     const res = await (fetch as any)(`${OLLAMA_BASE_URL}/api/chat`, {
@@ -212,32 +212,29 @@ ipcMain.handle('ai:chat', async (_e, message: string, subjectId: string, useCont
     })
 
     if (!res.ok) throw new Error(`Ollama error ${res.status}`)
-
-    const data = await res.json() as any
+    const data: any = await res.json()
     const response = data.message?.content ?? 'Sin respuesta'
     const duration = Date.now() - start
 
-    dbRun('INSERT INTO chat_messages (id, subject_id, role, content, model, duration, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    dbRun('INSERT INTO chat_messages (id,subject_id,role,content,model,duration,created_at) VALUES (?,?,?,?,?,?,?)',
       [uuidv4(), subjectId, 'assistant', response, OLLAMA_MODEL, duration, Date.now()])
 
     return { success: true, response, model: OLLAMA_MODEL, duration, sources: [] }
-  } catch (error: any) {
-    return { success: false, error: error.message }
+  } catch (e: any) {
+    return { success: false, error: e.message }
   }
 })
 
-ipcMain.handle('files:select', async () => {
-  return dialog.showOpenDialog(mainWindow!, {
+ipcMain.handle('files:select', async () =>
+  dialog.showOpenDialog(mainWindow!, {
     properties: ['openFile', 'multiSelections'],
-    filters: [
-      { name: 'Documentos', extensions: ['txt', 'md', 'pdf', 'docx'] },
-      { name: 'Todos', extensions: ['*'] }
-    ]
+    filters: [{ name: 'Documentos', extensions: ['txt', 'md', 'pdf', 'docx'] }]
   })
-})
+)
 
 ipcMain.handle('app:version', () => app.getVersion())
 
+// ─── Lifecycle ─────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   await initDatabase()
   createWindow()
@@ -247,8 +244,5 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    saveDb()
-    app.quit()
-  }
+  if (process.platform !== 'darwin') { saveDb(); app.quit() }
 })
